@@ -1,0 +1,205 @@
+#!/usr/bin/env node
+
+/**
+ * Module dependencies.
+ */
+
+var app = require('../app');
+var debug = require('debug')('server:server');
+var http = require('http');
+var https = require('https');
+var fs = require('fs');
+const path = require('path');
+
+var credentials = {
+  key: fs.readFileSync('/etc/letsencrypt/live/megachat.info/privkey.pem'),
+  cert: fs.readFileSync('/etc/letsencrypt/live/megachat.info/fullchain.pem')
+};
+
+const db = require('../_helper/db');
+const Message = db.Message;
+const User = db.User;
+
+var onlineUsers = {};
+var onlineUsersIds = {};
+
+/**
+ * Get port from environment and store in Express.
+ */
+
+var port = normalizePort(process.env.PORT || '3333');
+app.set('port', port);
+
+/**
+ * Create HTTP server.
+ */
+
+var server = http.createServer(app);
+
+/**
+ * Listen on provided port, on all network interfaces.
+ */
+
+server.listen(port);
+server.on('error', onError);
+server.on('listening', onListening);
+
+server = https.createServer(credentials, app);
+
+server.listen(3000);
+
+server.on('error', onError);
+server.on('listening', onListening);
+
+var io = require('socket.io')(server);
+
+io.on('connection', function (socket) {
+  console.log('A new client connected');
+
+  // To subscribe the socket to a given channel
+  socket.on('join', function (data) {
+    socket.join(data.username);
+  });
+
+  // To keep track of online users
+  socket.on('userPresence', function (data) {
+    onlineUsers[socket.id] = {
+      username: data.username
+    };
+    onlineUsersIds[data.username] = data.username;
+    socket.emit('onlineUsers', onlineUsersIds);
+  });
+
+  socket.on('delmsg', async function (data) {
+  	var messages = await Message.find({toUsername: data.toUsername, fromUsername: data.fromUsername});
+	const message = messages[data.ind];
+	var uid = message._id;
+    io.sockets.to(data.toUsername).emit('delmsg', data);
+
+	await Message.findByIdAndRemove(uid);
+  });
+
+  // For message passing
+  socket.on('message', async function (data) {
+
+  	const touser = await User.findById(data.toUsername);
+  	const fromuser = await User.findById(data.fromUsername);
+  	data.key = Date.now();
+  	let message;
+
+  	if(data.editedIndex > -1) {
+  		var messages = await Message.find({toUsername: data.toUsername, fromUsername: data.fromUsername});
+  		let msg = messages[data.editedIndex];
+
+  		message = await Message.findById(msg._id);
+
+  		Object.assign(message, data);
+  	} else {
+	  	touser.lastmessage = data.mob_message;
+	  	fromuser.lastmessage = data.mob_message;
+    	message = new Message(data);
+  	}
+
+    io.sockets.to(data.toUsername).emit('message', data);
+
+  	await touser.save();
+  	await fromuser.save();
+    await message.save();
+  });
+
+  // For message passing
+  socket.on('stream', function (data) {
+    io.sockets.to(data.toUsername).emit('stream', {data: data.imageData});
+  });
+
+  // For message passing
+  socket.on('audio', function (data) {
+    io.sockets.to(data.toUsername).emit('audio', data);
+  });
+
+  socket.on('addcontact', function (data) {
+    io.sockets.to(data.toUserId).emit('addcontact', data);
+  });
+
+  socket.on('broadcast', function (data) {
+  	io.sockets.to(data.toUserId).emit('broadcast', data.streamData);
+  });
+
+  socket.on('calling', function (data) {
+  	console.log(data);
+  	io.sockets.to(data.toId).emit('calling', data);
+  });
+
+  socket.on('refusecall', function (data) {
+  	io.sockets.to(data.callUserId).emit('refusecall', data);
+  })
+
+  // To listen for a client's disconnection from server and intimate other clients about the same
+  socket.on('disconnect', function (data) {
+    socket.broadcast.emit('disconnected', onlineUsers[socket.id].username);
+
+    delete onlineUsers[socket.id];
+    delete onlineUsersIds[data.username];
+    socket.broadcast.emit('onlineUsers', onlineUsers);
+  });
+});
+
+/**
+ * Normalize a port into a number, string, or false.
+ */
+
+function normalizePort(val) {
+  var port = parseInt(val, 10);
+
+  if (isNaN(port)) {
+    // named pipe
+    return val;
+  }
+
+  if (port >= 0) {
+    // port number
+    return port;
+  }
+
+  return false;
+}
+
+/**
+ * Event listener for HTTP server "error" event.
+ */
+
+function onError(error) {
+  if (error.syscall !== 'listen') {
+    throw error;
+  }
+
+  var bind = typeof port === 'string'
+    ? 'Pipe ' + port
+    : 'Port ' + port;
+
+  // handle specific listen errors with friendly messages
+  switch (error.code) {
+    case 'EACCES':
+      console.error(bind + ' requires elevated privileges');
+      process.exit(1);
+      break;
+    case 'EADDRINUSE':
+      console.error(bind + ' is already in use');
+      process.exit(1);
+      break;
+    default:
+      throw error;
+  }
+}
+
+/**
+ * Event listener for HTTP server "listening" event.
+ */
+
+function onListening() {
+  var addr = server.address();
+  var bind = typeof addr === 'string'
+    ? 'pipe ' + addr
+    : 'port ' + addr.port;
+  debug('Listening on ' + bind);
+}

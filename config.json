@@ -1,0 +1,4 @@
+{
+	"connectionString": "mongodb://root:megachat@159.65.66.30:27017/megachat",
+	"secretKey": "secretKey"
+}
